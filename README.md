@@ -1,3 +1,4 @@
+
 AgroChat — Workspace Layout
 
 This project scaffold keeps `frontend` intact and provides folders for backend, models, data and notebooks.
@@ -19,3 +20,6 @@ Next steps
 3. Paste backend scripts into `backend/` and `backend/services/`.
 
 If you want, I can try to search other folders on your machine for the notebooks and move them here — tell me if you want me to search `Downloads` or other locations.
+
+# Agrochat
+
