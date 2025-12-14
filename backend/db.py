@@ -105,6 +105,16 @@ def get_conversation(conv_id: str) -> Optional[Dict[str, Any]]:
         'lastMessage': row[4]
     }
 
+def delete_conversation(conv_id: str) -> bool:
+    """Delete a conversation by ID. Returns True if deleted, False if not found."""
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
 
 def _normalize_location_key(location: str) -> str:
     if not location:
