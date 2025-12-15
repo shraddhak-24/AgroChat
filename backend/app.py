@@ -15,6 +15,9 @@ import traceback
 from pathlib import Path
 import time
 import httpx
+import chromadb
+from chromadb.utils import embedding_functions
+import torchvision.models as tv_models
 
 # Load .env file from backend directory
 env_path = Path(__file__).parent / '.env'
@@ -69,6 +72,25 @@ for p in CHECKPOINT_LOCATIONS:
 if not CHECKPOINT_PATH:
     raise FileNotFoundError("efficientnet_b0_best.pth not found")
 
+# Insect checkpoint
+INSECT_CHECKPOINT_LOCATIONS = [
+    "models/efficientnet_insects.pth",
+    "models/efficienntnet_insects.pth",  # common typo
+    "../models/efficientnet_insects.pth",
+    "../models/efficienntnet_insects.pth",
+    str(Path.home() / "Downloads" / "efficientnet_insects.pth"),
+    str(Path.home() / "Downloads" / "efficienntnet_insects.pth"),
+]
+
+INSECT_CHECKPOINT_PATH = None
+for p in INSECT_CHECKPOINT_LOCATIONS:
+    if os.path.exists(p):
+        INSECT_CHECKPOINT_PATH = p
+        break
+
+if not INSECT_CHECKPOINT_PATH:
+    print("⚠️ Insect checkpoint not found. Insect CNN will be disabled.")
+
 # =========================
 # DISEASE KNOWLEDGE
 # =========================
@@ -122,99 +144,140 @@ def ask_llm(prompt: str) -> str:
             return "LLM error"
     return "[STUB LLM] " + prompt[:120]
 
-# =========================
-# RAG
-# =========================
 from services.rag import RAGService
 
-# Create comprehensive disease knowledge base
-DISEASE_KNOWLEDGE_FULL = """
-Tomato Early Blight:
-- Symptoms: Dark brown spots with concentric rings on lower leaves, yellowing leaves, defoliation
-- Cause: Fungus Alternaria solani, spreads in warm humid conditions
-- Organic Control: Remove infected leaves, use copper-based fungicides, improve air circulation
-- Chemical Control: Apply chlorothalonil or mancozeb fungicides every 7-10 days
-- Prevention: Rotate crops, avoid overhead watering, use resistant varieties, space plants properly
+# =========================
+# RAG with ChromaDB
+# =========================
+# Basic plant + insect knowledge for retrieval
+KNOWLEDGE_DOCS = [
+    # Plant diseases (condensed)
+    {
+        "id": "tomato_early_blight",
+        "category": "plant",
+        "title": "Tomato Early Blight",
+        "text": "Tomato Early Blight: Dark brown concentric leaf spots, yellowing lower leaves. Cause: Alternaria solani. Control: Remove infected leaves, copper/chlorothalonil/mancozeb sprays 7-10 days. Prevention: crop rotation, avoid overhead water, resistant varieties."
+    },
+    {
+        "id": "tomato_late_blight",
+        "category": "plant",
+        "title": "Tomato Late Blight",
+        "text": "Tomato Late Blight: Water-soaked lesions, white mold underside, rapid die-off. Cause: Phytophthora infestans. Control: mancozeb/chlorothalonil preventively weekly. Prevention: resistant varieties, good drainage, avoid overhead irrigation."
+    },
+    {
+        "id": "tomato_bacterial_spot",
+        "category": "plant",
+        "title": "Tomato Bacterial Spot",
+        "text": "Tomato Bacterial Spot: Small dark spots on leaves/fruit, yellowing, drop. Cause: Xanthomonas. Control: copper bactericides early. Prevention: clean seed, avoid working wet plants, rotate."
+    },
+    {
+        "id": "potato_late_blight",
+        "category": "plant",
+        "title": "Potato Late Blight",
+        "text": "Potato Late Blight: Water-soaked lesions, white mold, rapid collapse. Cause: Phytophthora infestans. Control: remove infected plants, copper/mancozeb preventively. Prevention: certified seed, drainage, spacing."
+    },
+    {
+        "id": "pepper_bacterial_spot",
+        "category": "plant",
+        "title": "Pepper Bacterial Spot",
+        "text": "Pepper Bacterial Spot: Water-soaked spots turning brown, defoliation. Cause: Xanthomonas. Control: copper sprays. Prevention: disease-free seed, avoid overhead irrigation, rotate."
+    },
+    # Insects
+    {
+        "id": "insect_aphids",
+        "category": "insect",
+        "title": "Aphids",
+        "text": "Aphids: Small soft-bodied clusters on shoots/leaves, sticky honeydew, curled leaves. Control: water spray, neem/insecticidal soap, introduce ladybugs. Monitor under leaves; avoid excess nitrogen."
+    },
+    {
+        "id": "insect_armyworms",
+        "category": "insect",
+        "title": "Armyworms",
+        "text": "Armyworms/Fall Armyworms: Caterpillars skeletonize leaves, windowpaning, frass. Control: hand-pick early, Bt sprays, spinosad; monitor egg masses; use pheromone traps; maintain field sanitation."
+    },
+    {
+        "id": "insect_corn_borers",
+        "category": "insect",
+        "title": "Corn Borers",
+        "text": "Corn Borers: Larvae tunnel stalks/ears causing broken stalks, frass at entry holes. Control: Bt varieties, timely harvest, destroy residues, Bt or spinosad at tasseling, pheromone traps for timing."
+    },
+    {
+        "id": "insect_tomato_hornworms",
+        "category": "insect",
+        "title": "Tomato Hornworms",
+        "text": "Tomato Hornworms: Large green caterpillars, heavy defoliation, green droppings. Control: hand-pick, encourage parasitic wasps (white cocoons), use Bt/spinosad if severe; rotate and weed control."
+    },
+    {
+        "id": "insect_spider_mites",
+        "category": "insect",
+        "title": "Spider Mites",
+        "text": "Spider Mites: Yellow stippling, fine webbing under leaves, thrive hot/dry. Control: increase humidity, water spray, neem/miticides, remove heavily infested leaves; avoid drought stress."
+    },
+    {
+        "id": "insect_thrips",
+        "category": "insect",
+        "title": "Thrips",
+        "text": "Thrips: Silvery streaks, distorted buds, possible virus vectors. Control: blue/yellow sticky traps, spinosad/azadirachtin, remove weeds, reflective mulches, rotate insecticides."
+    },
+    {
+        "id": "insect_fruit_flies",
+        "category": "insect",
+        "title": "Fruit Flies",
+        "text": "Fruit Flies: Oviposition scars on fruit, maggots inside. Control: bait traps, sanitation (remove fallen fruit), bagging fruit, protein baits, timely harvest."
+    },
+    {
+        "id": "insect_colorado_potato_beetle",
+        "category": "insect",
+        "title": "Colorado Potato Beetle",
+        "text": "Colorado Potato Beetle: Yellow-black striped beetles, orange larvae defoliate potatoes. Control: hand-pick eggs/larvae, rotate crops, mulch, spinosad/pyrethroids with rotation to avoid resistance."
+    },
+    {
+        "id": "insect_bmsb",
+        "category": "insect",
+        "title": "Brown Marmorated Stink Bug",
+        "text": "Brown Marmorated Stink Bug: Shield-shaped, causes fruit catfacing and feeding spots. Control: perimeter monitoring, remove weeds, trap crops, use netting; targeted pyrethroids if severe."
+    },
+]
 
-Tomato Late Blight:
-- Symptoms: Water-soaked lesions on leaves, white mold on undersides, rapid plant death
-- Cause: Phytophthora infestans, thrives in cool wet weather
-- Organic Control: Remove and destroy infected plants, use copper fungicides preventively
-- Chemical Control: Apply mancozeb or chlorothalonil before infection, repeat weekly
-- Prevention: Plant resistant varieties, avoid overhead irrigation, ensure good drainage
+# Initialize ChromaDB client and collection
+CHROMA_PATH = Path(__file__).parent / "data" / "chroma"
+CHROMA_PATH.mkdir(parents=True, exist_ok=True)
+embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="sentence-transformers/all-MiniLM-L6-v2")
+chroma_client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+chroma_collection = chroma_client.get_or_create_collection(
+    name="agrochat_knowledge",
+    embedding_function=embedding_fn,
+)
 
-Tomato Bacterial Spot:
-- Symptoms: Small dark spots on leaves and fruits, leaf yellowing and drop
-- Cause: Xanthomonas bacteria, spreads through water and tools
-- Organic Control: Remove infected plants, use copper-based sprays, sanitize tools
-- Chemical Control: Apply copper-based bactericides early in season
-- Prevention: Use disease-free seeds, avoid working when plants are wet, rotate crops
+# Upsert knowledge docs (idempotent)
+try:
+    chroma_collection.upsert(
+        ids=[doc["id"] for doc in KNOWLEDGE_DOCS],
+        documents=[doc["text"] for doc in KNOWLEDGE_DOCS],
+        metadatas=[{"title": doc["title"], "category": doc["category"]} for doc in KNOWLEDGE_DOCS],
+    )
+    print(f"ChromaDB loaded docs: {len(KNOWLEDGE_DOCS)}")
+except Exception as e:
+    print(f"⚠️ Failed to load ChromaDB docs: {e}")
 
-Tomato Leaf Mold:
-- Symptoms: Yellow patches on upper leaf surface, gray mold on lower surface
-- Cause: Passalora fulva fungus, common in greenhouse conditions
-- Organic Control: Improve ventilation, remove infected leaves, use sulfur sprays
-- Chemical Control: Apply chlorothalonil or mancozeb fungicides
-- Prevention: Reduce humidity, increase air circulation, space plants adequately
-
-Tomato Septoria Leaf Spot:
-- Symptoms: Small circular spots with dark borders and light centers on leaves
-- Cause: Septoria lycopersici fungus, spreads via water splash
-- Organic Control: Remove lower infected leaves, use copper fungicides
-- Chemical Control: Apply mancozeb or chlorothalonil every 7-10 days
-- Prevention: Avoid overhead watering, mulch around plants, rotate crops
-
-Tomato Spider Mites:
-- Symptoms: Yellow stippling on leaves, fine webbing, leaf drop
-- Cause: Two-spotted spider mites, thrive in hot dry conditions
-- Organic Control: Spray with water to increase humidity, use neem oil or insecticidal soap
-- Chemical Control: Apply miticides like abamectin or spiromesifen
-- Prevention: Maintain adequate moisture, introduce beneficial insects, avoid over-fertilizing
-
-Tomato Target Spot:
-- Symptoms: Brown spots with target-like rings, leaf yellowing
-- Cause: Corynespora cassiicola fungus
-- Organic Control: Remove infected leaves, improve air circulation
-- Chemical Control: Apply chlorothalonil or azoxystrobin fungicides
-- Prevention: Use resistant varieties, avoid overhead watering, space plants properly
-
-Tomato Mosaic Virus:
-- Symptoms: Mottled yellow and green leaves, stunted growth, distorted fruits
-- Cause: Tobacco mosaic virus, spreads through contact and tools
-- Organic Control: Remove and destroy infected plants, sanitize tools
-- Chemical Control: No effective chemical treatment available
-- Prevention: Use virus-free seeds, avoid tobacco use near plants, sanitize tools regularly
-
-Tomato Yellow Leaf Curl Virus:
-- Symptoms: Yellowing and curling of leaves, stunted growth, reduced fruit
-- Cause: Begomovirus transmitted by whiteflies
-- Organic Control: Remove infected plants, control whiteflies with neem oil
-- Chemical Control: Apply systemic insecticides for whitefly control
-- Prevention: Use resistant varieties, control whiteflies early, use row covers
-
-Potato Early Blight:
-- Symptoms: Dark brown spots with concentric rings, yellowing lower leaves
-- Cause: Alternaria solani fungus
-- Organic Control: Remove infected leaves, use copper fungicides
-- Chemical Control: Apply chlorothalonil or mancozeb every 7-10 days
-- Prevention: Rotate crops, avoid overhead watering, use certified seed potatoes
-
-Potato Late Blight:
-- Symptoms: Water-soaked lesions, white mold, rapid plant collapse
-- Cause: Phytophthora infestans
-- Organic Control: Remove infected plants immediately, use copper fungicides
-- Chemical Control: Apply mancozeb preventively, repeat weekly in wet conditions
-- Prevention: Plant certified disease-free seed, ensure good drainage, space plants
-
-Pepper Bell Bacterial Spot:
-- Symptoms: Small water-soaked spots that turn brown, leaf drop
-- Cause: Xanthomonas bacteria
-- Organic Control: Remove infected plants, use copper-based sprays
-- Chemical Control: Apply copper bactericides early in season
-- Prevention: Use disease-free seeds, avoid overhead irrigation, rotate crops
-"""
-
-RAG = RAGService(DISEASE_KNOWLEDGE_FULL, CLASS_TO_TITLE)
+# Helper for RAG retrieval
+def query_knowledge(query: str, category: str | None = None, top_k: int = 3) -> str:
+    where = {"category": category} if category else None
+    try:
+        res = chroma_collection.query(
+            query_texts=[query],
+            n_results=top_k,
+            where=where,
+        )
+        docs = res.get("documents", [[]])[0]
+        metas = res.get("metadatas", [[]])[0]
+        out_lines = []
+        for doc, meta in zip(docs, metas):
+            title = meta.get("title", "Knowledge")
+            out_lines.append(f"{title}: {doc}")
+        return "\n\n".join(out_lines) if out_lines else "No specific knowledge found."
+    except Exception as e:
+        return f"Knowledge lookup unavailable: {e}"
 
 # =========================
 # CNN LOAD
@@ -229,6 +292,50 @@ MODEL = EfficientNet.from_pretrained(
 MODEL.load_state_dict(checkpoint["model"])
 MODEL.to(DEVICE)
 MODEL.eval()
+
+# Insect model (optional)
+INSECT_CLASSES = [
+    'Africanized Honey Bees (Killer Bees)', 'Aphids', 'Armyworms', 'Brown Marmorated Stink Bugs',
+    'Cabbage Loopers', 'Citrus Canker', 'Colorado Potato Beetles', 'Corn Borers', 'Corn Earworms',
+    'Fall Armyworms', 'Fruit Flies', 'Spider Mites', 'Thrips', 'Tomato Hornworms', 'Western Corn Rootworms'
+]
+
+if INSECT_CHECKPOINT_PATH:
+    try:
+        insect_checkpoint = torch.load(INSECT_CHECKPOINT_PATH, map_location=DEVICE)
+
+        # Handle different checkpoint formats
+        state_dict = None
+        if isinstance(insect_checkpoint, dict):
+            if "model" in insect_checkpoint:
+                state_dict = insect_checkpoint["model"]
+            elif "state_dict" in insect_checkpoint:
+                state_dict = insect_checkpoint["state_dict"]
+            else:
+                # If it looks like a pure state dict, try using it directly
+                state_dict = {k: v for k, v in insect_checkpoint.items()} if insect_checkpoint else insect_checkpoint
+
+            cls = insect_checkpoint.get("classes", INSECT_CLASSES)
+            if isinstance(cls, list) and len(cls) == len(INSECT_CLASSES):
+                INSECT_CLASSES = cls
+        else:
+            state_dict = insect_checkpoint
+
+        # Use torchvision EfficientNet-B0 to match the checkpoint key format (features.*)
+        INSECT_MODEL = tv_models.efficientnet_b0(weights=None)
+        # Replace classifier for our number of insect classes
+        INSECT_MODEL.classifier[1] = torch.nn.Linear(INSECT_MODEL.classifier[1].in_features, len(INSECT_CLASSES))
+        missing, unexpected = INSECT_MODEL.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            print(f"⚠️ Insect model loaded with missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
+        INSECT_MODEL.to(DEVICE)
+        INSECT_MODEL.eval()
+        print(f"Insect model loaded from: {INSECT_CHECKPOINT_PATH}")
+    except Exception as e:
+        print(f"⚠️ Failed to load insect model from {INSECT_CHECKPOINT_PATH}: {e}")
+        INSECT_MODEL = None
+else:
+    INSECT_MODEL = None
 
 TRANSFORM = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -269,78 +376,134 @@ def health():
 # =========================
 OPENWEATHER_KEY = os.getenv("WEATHER_KEY")
 if OPENWEATHER_KEY:
-    print(f"✅ Weather API key loaded: {OPENWEATHER_KEY[:8]}...")
+    print(f"✅ WEATHER_KEY found (OpenWeather), but using Open-Meteo (no key needed).")
 else:
-    print("⚠️ Weather API key not found in environment")
+    print("ℹ️ No WEATHER_KEY set. Using Open-Meteo (no API key required).")
+
+OPENMETEO_WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+OPENMETEO_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+
+# Simple weather-code descriptions for Open-Meteo
+WEATHER_CODE_DESCRIPTIONS = {
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Depositing rime fog",
+    51: "Light drizzle",
+    53: "Moderate drizzle",
+    55: "Dense drizzle",
+    61: "Slight rain",
+    63: "Moderate rain",
+    65: "Heavy rain",
+    71: "Slight snow fall",
+    73: "Moderate snow fall",
+    75: "Heavy snow fall",
+    80: "Rain showers",
+    81: "Moderate rain showers",
+    82: "Violent rain showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with slight hail",
+    99: "Thunderstorm with heavy hail",
+}
+
 
 @app.get("/weather")
 async def weather(query: str):
-    if not OPENWEATHER_KEY:
-        raise HTTPException(500, "WEATHER_KEY missing")
-
-    async with httpx.AsyncClient() as client:
-        geo = await client.get(
-            "http://api.openweathermap.org/geo/1.0/direct",
-            params={"q": query, "limit": 1, "appid": OPENWEATHER_KEY}
-        )
-        loc = geo.json()[0]
-        w = await client.get(
-            "https://api.openweathermap.org/data/2.5/weather",
-            params={
-                "lat": loc["lat"],
-                "lon": loc["lon"],
-                "appid": OPENWEATHER_KEY,
-                "units": "metric"
+    """Get current weather for a city using Open-Meteo (no API key)."""
+    async def _fetch(lat: float, lon: float, label: str) -> dict:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                OPENMETEO_WEATHER_URL,
+                params={"latitude": lat, "longitude": lon, "current_weather": "true"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            cw = data.get("current_weather")
+            if not cw:
+                raise RuntimeError("No current_weather in response")
+            code = cw.get("weathercode")
+            desc = WEATHER_CODE_DESCRIPTIONS.get(code, "Current conditions")
+            return {
+                "success": True,
+                "name": label,
+                "main": {
+                    "temp": cw.get("temperature"),
+                    "feels_like": cw.get("temperature"),
+                    "humidity": None,
+                },
+                "weather": [{"description": desc}],
+                "wind": {"speed": cw.get("windspeed")},
             }
-        )
-        return {"success": True, **w.json()}
-
-@app.get("/weather_coords")
-async def weather_coords(lat: float = Query(...), lon: float = Query(...)):
-    if not OPENWEATHER_KEY:
-        # Return a helpful message instead of error
-        return {
-            "success": False,
-            "message": "Weather API key not configured. Please set WEATHER_KEY in .env file.",
-            "temp": None,
-            "description": "Weather data unavailable"
-        }
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            w = await client.get(
-                "https://api.openweathermap.org/data/2.5/weather",
-                params={
-                    "lat": lat,
-                    "lon": lon,
-                    "appid": OPENWEATHER_KEY,
-                    "units": "metric"
-                }
+            geo = await client.get(
+                OPENMETEO_GEOCODE_URL,
+                params={"name": query, "count": 1, "language": "en", "format": "json"},
             )
-            w.raise_for_status()
-            data = w.json()
+            geo.raise_for_status()
+            gdata = geo.json()
+            if not gdata.get("results"):
+                return {"success": False, "message": f"No location found for '{query}'"}
+            loc = gdata["results"][0]
+            lat = float(loc["latitude"])
+            lon = float(loc["longitude"])
+            label_parts = [loc.get("name")]
+            if loc.get("country"):
+                label_parts.append(loc["country"])
+            label = ", ".join([p for p in label_parts if p])
+            return await _fetch(lat, lon, label)
+    except httpx.HTTPError as e:
+        return {"success": False, "message": f"Weather API HTTP error: {str(e)}"}
+    except Exception as e:
+        return {"success": False, "message": f"Weather lookup failed: {str(e)}"}
+
+
+@app.get("/weather_coords")
+async def weather_coords(lat: float = Query(...), lon: float = Query(...)):
+    """Get current weather by coordinates using Open-Meteo."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                OPENMETEO_WEATHER_URL,
+                params={"latitude": lat, "longitude": lon, "current_weather": "true"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            cw = data.get("current_weather")
+            if not cw:
+                return {
+                    "success": False,
+                    "message": "No current weather data available",
+                    "temp": None,
+                    "description": "Weather data unavailable",
+                }
+            code = cw.get("weathercode")
+            desc = WEATHER_CODE_DESCRIPTIONS.get(code, "Current conditions")
             return {
                 "success": True,
-                "temp": data.get("main", {}).get("temp"),
-                "feels_like": data.get("main", {}).get("feels_like"),
-                "humidity": data.get("main", {}).get("humidity"),
-                "description": data.get("weather", [{}])[0].get("description", ""),
-                "wind_speed": data.get("wind", {}).get("speed"),
-                "location": data.get("name", "Unknown")
+                "temp": cw.get("temperature"),
+                "feels_like": cw.get("temperature"),
+                "humidity": None,
+                "description": desc,
+                "wind_speed": cw.get("windspeed"),
+                "location": f"{lat:.3f}, {lon:.3f}",
             }
     except httpx.HTTPError as e:
         return {
             "success": False,
-            "message": f"Weather API error: {str(e)}",
+            "message": f"Weather API HTTP error: {str(e)}",
             "temp": None,
-            "description": "Weather data unavailable"
+            "description": "Weather data unavailable",
         }
     except Exception as e:
         return {
             "success": False,
             "message": f"Error fetching weather: {str(e)}",
             "temp": None,
-            "description": "Weather data unavailable"
+            "description": "Weather data unavailable",
         }
 
 # =========================
@@ -351,37 +514,43 @@ async def analyze(
     image: UploadFile = File(...),
     question: str = Query("What treatment do you recommend?")
 ):
-    # Check if this is an insect identification request
+    img = Image.open(io.BytesIO(await image.read())).convert("RGB")
+    tensor = TRANSFORM(img).unsqueeze(0).to(DEVICE)
+
     question_lower = question.lower()
     is_insect_query = '[insect]' in question_lower or 'insect' in question_lower
-    
-    if is_insect_query:
-        # For insects, use LLM to provide identification help
-        # Since we don't have an insect CNN model, provide general insect identification advice
-        insect_advice = ask_llm(f"""You are an agricultural expert. A user has uploaded an image of an insect and asked: "{question}"
 
-Please provide:
-1. Possible identification of the insect
-2. Characteristics to look for
-3. Whether it's beneficial or a pest
-4. Control methods if it's a pest
-5. Prevention tips
+    # Insect branch
+    if is_insect_query and INSECT_MODEL:
+        with torch.no_grad():
+            probs = F.softmax(INSECT_MODEL(tensor), dim=1)[0]
+        conf, idx = torch.max(probs, 0)
+        insect_class = INSECT_CLASSES[idx.item()]
+        confidence_score = round(conf.item() * 100, 2)
 
-Be specific and helpful based on common agricultural insects.""")
-        
+        # RAG for insect knowledge
+        knowledge = query_knowledge(f"{insect_class}. {question}", category="insect")
+        advice = f"Detected insect: {insect_class}\nConfidence: {confidence_score}%\n\nRecommended actions:\n{knowledge}"
+
+        return {
+            "disease": insect_class,
+            "disease_title": insect_class,
+            "confidence": confidence_score,
+            "advice": advice,
+            "llm_mode": LLM_TYPE,
+            "is_insect": True
+        }
+    elif is_insect_query and not INSECT_MODEL:
         return {
             "disease": "Insect Identification",
             "disease_title": "Insect Identification",
             "confidence": 0,
-            "advice": f"🐛 Insect Identification Help:\n\n{insect_advice}\n\nNote: For accurate identification, please describe the insect's size, color, location on plant, and any damage you see.",
+            "advice": "⚠️ Insect CNN model not available. Please place efficientnet_insects.pth in backend/models.",
             "llm_mode": LLM_TYPE,
             "is_insect": True
         }
-    
-    # For plant diseases, use CNN model
-    img = Image.open(io.BytesIO(await image.read())).convert("RGB")
-    tensor = TRANSFORM(img).unsqueeze(0).to(DEVICE)
 
+    # Plant branch
     with torch.no_grad():
         probs = F.softmax(MODEL(tensor), dim=1)[0]
 
@@ -389,10 +558,10 @@ Be specific and helpful based on common agricultural insects.""")
     disease = CLASS_NAMES[idx.item()]
     confidence_score = round(conf.item() * 100, 2)
     
-    # Get detailed advice from RAG
-    advice = RAG.query(question, disease)
+    # Get detailed advice from Chroma RAG
+    knowledge = query_knowledge(f"{disease}. {question}", category="plant")
+    advice = f"{knowledge}"
 
-    # Format response better
     disease_title = CLASS_TO_TITLE.get(disease, disease)
     
     return {
@@ -475,49 +644,39 @@ async def chat(req: ChatRequest):
         
         if location:
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    # First get coordinates
-                    geo = await client.get(
-                        "http://api.openweathermap.org/geo/1.0/direct",
-                        params={"q": location, "limit": 1, "appid": OPENWEATHER_KEY}
-                    )
-                    geo_data = geo.json()
-                    if geo_data and len(geo_data) > 0:
-                        lat = geo_data[0]["lat"]
-                        lon = geo_data[0]["lon"]
-                        city_name = geo_data[0].get("name", location)
-                        
-                        # Get weather
-                        w = await client.get(
-                            "https://api.openweathermap.org/data/2.5/weather",
-                            params={
-                                "lat": lat,
-                                "lon": lon,
-                                "appid": OPENWEATHER_KEY,
-                                "units": "metric"
-                            }
-                        )
-                        w.raise_for_status()
-                        weather_data = w.json()
-                        
-                        temp = weather_data.get("main", {}).get("temp")
-                        feels_like = weather_data.get("main", {}).get("feels_like")
-                        humidity = weather_data.get("main", {}).get("humidity")
-                        description = weather_data.get("weather", [{}])[0].get("description", "")
-                        wind_speed = weather_data.get("wind", {}).get("speed")
-                        
-                        response = f"🌤️ Weather in {city_name}:\n\n"
-                        response += f"🌡️ Temperature: {temp:.1f}°C (feels like {feels_like:.1f}°C)\n"
-                        response += f"☁️ Conditions: {description.title()}\n"
-                        response += f"💧 Humidity: {humidity}%\n"
-                        if wind_speed:
-                            response += f"💨 Wind Speed: {wind_speed} m/s\n"
-                        
-                        return {"answer": response}
-            except httpx.HTTPError as e:
-                return {"answer": f"⚠️ Weather service temporarily unavailable. Please try again later."}
+                # Re-use internal /weather handler for robustness
+                # Strip country code if present for nicer display
+                city_query = location.split(",")[0]
+                weather_raw = await weather(city_query)
+
+                if not weather_raw.get("success"):
+                    msg = weather_raw.get("message") or "Unknown weather service error."
+                    return {"answer": f"⚠️ Weather service error: {msg}"}
+
+                temp = weather_raw.get("main", {}).get("temp")
+                feels_like = weather_raw.get("main", {}).get("feels_like")
+                humidity = weather_raw.get("main", {}).get("humidity")
+                description = weather_raw.get("weather", [{}])[0].get("description", "")
+                wind_speed = weather_raw.get("wind", {}).get("speed")
+                city_name = weather_raw.get("name", city_query)
+
+                response = f"🌤️ Weather in {city_name}:\n\n"
+                if temp is not None and feels_like is not None:
+                    response += f"🌡️ Temperature: {temp:.1f}°C (feels like {feels_like:.1f}°C)\n"
+                if description:
+                    response += f"☁️ Conditions: {description.title()}\n"
+                if humidity is not None:
+                    response += f"💧 Humidity: {humidity}%\n"
+                if wind_speed:
+                    response += f"💨 Wind Speed: {wind_speed} m/s\n"
+
+                return {"answer": response}
+            except HTTPException as e:
+                # Bubble up clear API error from /weather
+                return {"answer": f"⚠️ Weather API error: {e.detail}"}
             except Exception as e:
-                return {"answer": f"⚠️ Could not fetch weather data. Please make sure you mentioned a city name (e.g., 'weather in Chennai')."}
+                # Include the actual error so user can see what's wrong
+                return {"answer": f"⚠️ Could not fetch weather data. Details: {str(e)}"}
         
         # If no location found, provide helpful message
         return {"answer": "🌤️ To get weather information, please mention your city name in your question.\n\nExamples:\n• 'What's the weather in Chennai?'\n• 'Weather in Mumbai'\n• 'Temperature in Delhi'\n\nOr click the weather button and allow location access."}

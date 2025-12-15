@@ -15,6 +15,10 @@ scikit-learn>=1.2.0
 # Requests
 requests>=2.28.0
 
+# RAG with Chroma
+chromadb>=0.4.24
+sentence-transformers>=2.2.2
+
 # Optional: For llama-cpp-python support (uncomment if using)
 # llama-cpp-python>=0.2.0
 

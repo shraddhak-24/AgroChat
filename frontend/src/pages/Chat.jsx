@@ -96,6 +96,14 @@ export default function Chat({ onLogout, userEmail }) {
   const messagesRef = useRef(null)
   const fileInputRef = useRef(null)
 
+  // Track whether user is near the bottom so we only auto-scroll in that case
+  function isNearBottom(el) {
+    if (!el) return true
+    const threshold = 80 // px
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    return distanceFromBottom <= threshold
+  }
+
   const currentConv = conversations.find(c => c.id === currentConversationId)
 
   useEffect(() => {
@@ -198,6 +206,10 @@ export default function Chat({ onLogout, userEmail }) {
   }
 
   function addMessage(convId, msg, onComplete) {
+    // Check if user is currently near the bottom before we add a new message
+    const shouldAutoScroll =
+      messagesRef.current ? isNearBottom(messagesRef.current) : true
+
     setConversations(prev => {
       const updated = prev.map(c =>
         c.id === convId
@@ -213,21 +225,29 @@ export default function Chat({ onLogout, userEmail }) {
       }
       return updated
     })
-    // Auto-scroll to bottom when new message is added
+    // Auto-scroll to bottom only if the user was already near the bottom
+    if (shouldAutoScroll) {
+      setTimeout(() => {
+        if (messagesRef.current) {
+          messagesRef.current.scrollTop = messagesRef.current.scrollHeight
+        }
+      }, 100)
+    }
+  }
+
+  // Auto-scroll when conversation changes or messages update
+  useEffect(() => {
+    const el = messagesRef.current
+    if (!el || !currentConv) return
+
+    // If user has scrolled up (not near bottom), don't force-scroll like ChatGPT
+    if (!isNearBottom(el)) return
+
     setTimeout(() => {
       if (messagesRef.current) {
         messagesRef.current.scrollTop = messagesRef.current.scrollHeight
       }
     }, 100)
-  }
-
-  // Auto-scroll when conversation changes or messages update
-  useEffect(() => {
-    if (messagesRef.current && currentConv) {
-      setTimeout(() => {
-        messagesRef.current.scrollTop = messagesRef.current.scrollHeight
-      }, 100)
-    }
   }, [currentConv?.messages?.length, currentConversationId, isTyping])
 
   function handleFileSelect(e) {
