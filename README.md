@@ -1,6 +1,7 @@
 # 🌱 AgroChat - Plant Disease Detection & Agricultural Assistant
 
-A comprehensive agricultural chatbot that uses AI to detect plant diseases, provide treatment advice, and answer farming questions.
+A comprehensive agricultural chatbot that uses AI to detect plant diseases, provide treatment advice, and answer farming questions. AgroChat combines computer vision and conversational AI to support farmers with real-time agricultural assistance.
+
 
 ## 📁 Project Structure
 
@@ -83,4 +84,4 @@ All documentation has been organized in the `docs/` folder:
 
 ---
 
-**Built with**: React, FastAPI, PyTorch, EfficientNet
+**Built with**: React, FastAPI, PyTorch, EfficientNet 
